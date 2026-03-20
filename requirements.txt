@@ -1,0 +1,7 @@
+numpy>=1.24
+pandas>=2.0
+plotly>=5.20
+requests>=2.31
+streamlit>=1.40
+streamlit-autorefresh>=1.0
+python-dotenv>=1.0
