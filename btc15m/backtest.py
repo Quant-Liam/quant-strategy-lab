@@ -5,10 +5,11 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .features import compute_market_features
-from .kelly import kelly_fraction_binary
-from .model import predict_up_probability
-from .strategy import decide_trade_side
+from .math import ParticleFilterConfig, compute_particle_filter_frame, compute_regime_frame
+from .math.features import compute_market_features
+from .math.kelly import kelly_fraction_binary
+from .math.model import predict_up_probability
+from .strategy import apply_particle_filter_entry_filter, decide_trade_side
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,17 @@ class BacktestConfig:
     max_fraction: float = 0.20
     min_history: int = 40
     entry_timing: str = "close"
+    use_regime_filter: bool = True
+    regime_lookback: int = 480
+    regime_min_history: int = 80
+    use_particle_filter: bool = True
+    particle_filter_lookback: int = 240
+    particle_filter_particles: int = 300
+    particle_filter_entry_filter: bool = True
+    particle_filter_min_gap: float = 0.0
+    walk_forward_indicators: bool = True
+    regime_refit_every: int = 96
+    particle_filter_refit_every: int = 8
 
 
 @dataclass(frozen=True)
@@ -63,6 +75,7 @@ def run_backtest(
         odds = pd.DataFrame(index=df.index)
 
     rows: list[dict[str, object]] = []
+    regime_frame, pf_frame = _build_indicator_frames(df=df, config=config)
 
     start_i = config.min_history
     end_i = len(df) - 1 if entry_timing == "close" else len(df)
@@ -101,12 +114,27 @@ def run_backtest(
 
         model_out = predict_up_probability(features)
         p_up = model_out.p_up
+        regime_ts = ts if entry_timing == "close" else df.index[max(i - 1, 0)]
+        regime_row = _lookup_regime(regime_frame, regime_ts)
+        pf_row = _lookup_indicator(pf_frame, regime_ts)
+        regime_name = str(regime_row.get("regime", "unfiltered"))
+        allowed_side = str(regime_row.get("allowed_side", "BOTH"))
+        regime_confidence = float(regime_row.get("confidence", 0.0))
         decision = decide_trade_side(
             p_up=p_up,
             market_up_price=market_up,
             market_down_price=market_down,
             edge_buffer=config.edge_buffer,
+            regime=regime_name,
+            allowed_side=allowed_side,
         )
+        if config.use_particle_filter and config.particle_filter_entry_filter:
+            decision = apply_particle_filter_entry_filter(
+                decision=decision,
+                observed_price=live_price,
+                fair_price=float(pf_row.get("pf_fair_price", np.nan)),
+                min_gap=config.particle_filter_min_gap,
+            )
 
         stake_fraction = 0.0
         stake_usd = 0.0
@@ -156,6 +184,24 @@ def run_backtest(
                 "outcome_side": outcome_side,
                 "decision": decision.side,
                 "decision_reason": decision.reason,
+                "regime": regime_name,
+                "regime_allowed_side": allowed_side,
+                "regime_confidence": regime_confidence,
+                "blocked_by_regime": bool(decision.blocked_by_regime),
+                "blocked_by_particle_filter": bool(decision.blocked_by_particle_filter),
+                "bull_prob": float(regime_row.get("bull_prob", np.nan)),
+                "neutral_prob": float(regime_row.get("neutral_prob", np.nan)),
+                "bear_prob": float(regime_row.get("bear_prob", np.nan)),
+                "pf_fair_price": float(pf_row.get("pf_fair_price", np.nan)),
+                "pf_gap": float(pf_row.get("pf_gap", np.nan)),
+                "pf_gap_pct": float(pf_row.get("pf_gap_pct", np.nan)),
+                "pf_drift": float(pf_row.get("pf_drift", np.nan)),
+                "pf_uncertainty": float(pf_row.get("pf_uncertainty", np.nan)),
+                "pf_confidence": float(pf_row.get("pf_confidence", np.nan)),
+                "pf_price_below_fair": bool(pf_row.get("pf_price_below_fair", False)),
+                "pf_price_above_fair": bool(pf_row.get("pf_price_above_fair", False)),
+                "pf_bull_long_setup": bool(pf_row.get("pf_bull_long_setup", False)),
+                "pf_bear_short_setup": bool(pf_row.get("pf_bear_short_setup", False)),
                 "p_up": p_up,
                 "p_side": p_side,
                 "side_price": side_price,
@@ -240,3 +286,126 @@ def _infer_candle_interval(index: pd.Index) -> pd.Timedelta:
         if inferred > pd.Timedelta(0):
             return inferred
     return pd.Timedelta(minutes=15)
+
+
+def _lookup_regime(regime_frame: pd.DataFrame, ts: pd.Timestamp) -> dict[str, object]:
+    return _lookup_indicator(regime_frame, ts)
+
+
+def _lookup_indicator(frame: pd.DataFrame, ts: pd.Timestamp) -> dict[str, object]:
+    if frame.empty:
+        return {}
+    if ts in frame.index:
+        return frame.loc[ts].to_dict()
+
+    subset = frame.loc[frame.index <= ts]
+    if subset.empty:
+        return frame.iloc[0].to_dict()
+    return subset.iloc[-1].to_dict()
+
+
+def _build_indicator_frames(
+    df: pd.DataFrame,
+    config: BacktestConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if not config.walk_forward_indicators:
+        regime_frame = pd.DataFrame()
+        if config.use_regime_filter:
+            regime_frame = compute_regime_frame(
+                candles_15m=df,
+                lookback=config.regime_lookback,
+                min_history=config.regime_min_history,
+            )
+        pf_frame = pd.DataFrame()
+        if config.use_particle_filter:
+            pf_frame = compute_particle_filter_frame(
+                candles_15m=df,
+                regime_frame=regime_frame if not regime_frame.empty else None,
+                config=ParticleFilterConfig(
+                    num_particles=config.particle_filter_particles,
+                    lookback=config.particle_filter_lookback,
+                ),
+            )
+        return regime_frame, pf_frame
+
+    regime_frame = _build_walk_forward_regime_frame(df=df, config=config) if config.use_regime_filter else pd.DataFrame()
+    pf_frame = _build_walk_forward_particle_filter_frame(df=df, config=config, regime_frame=regime_frame) if config.use_particle_filter else pd.DataFrame()
+    return regime_frame, pf_frame
+
+
+def _build_walk_forward_regime_frame(
+    df: pd.DataFrame,
+    config: BacktestConfig,
+) -> pd.DataFrame:
+    warmup = max(config.min_history, config.regime_min_history)
+    step = max(1, config.regime_refit_every)
+    rows: list[dict[str, object]] = []
+
+    for end_i in _refit_points(length=len(df), warmup=warmup, step=step):
+        hist = _history_slice(df=df, end_i=end_i, lookback=config.regime_lookback)
+        frame = compute_regime_frame(
+            candles_15m=hist,
+            lookback=config.regime_lookback,
+            min_history=config.regime_min_history,
+        )
+        if frame.empty:
+            continue
+        row = frame.iloc[-1].to_dict()
+        row["timestamp"] = df.index[end_i]
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).set_index("timestamp").sort_index()
+
+
+def _build_walk_forward_particle_filter_frame(
+    df: pd.DataFrame,
+    config: BacktestConfig,
+    regime_frame: pd.DataFrame,
+) -> pd.DataFrame:
+    warmup = max(config.min_history, config.regime_min_history)
+    step = max(1, config.particle_filter_refit_every)
+    rows: list[dict[str, object]] = []
+
+    for end_i in _refit_points(length=len(df), warmup=warmup, step=step):
+        hist = _history_slice(
+            df=df,
+            end_i=end_i,
+            lookback=max(config.particle_filter_lookback, config.regime_lookback),
+        )
+        regime_hist = regime_frame.loc[regime_frame.index <= df.index[end_i]].copy() if not regime_frame.empty else pd.DataFrame()
+        pf = compute_particle_filter_frame(
+            candles_15m=hist,
+            regime_frame=regime_hist if not regime_hist.empty else None,
+            config=ParticleFilterConfig(
+                num_particles=config.particle_filter_particles,
+                lookback=config.particle_filter_lookback,
+            ),
+        )
+        if pf.empty:
+            continue
+        row = pf.iloc[-1].to_dict()
+        row["timestamp"] = df.index[end_i]
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).set_index("timestamp").sort_index()
+
+
+def _refit_points(length: int, warmup: int, step: int) -> list[int]:
+    if length <= warmup:
+        return []
+    points = list(range(warmup, length, step))
+    final_idx = length - 1
+    if not points or points[-1] != final_idx:
+        points.append(final_idx)
+    return points
+
+
+def _history_slice(df: pd.DataFrame, end_i: int, lookback: int) -> pd.DataFrame:
+    if lookback <= 0:
+        return df.iloc[: end_i + 1]
+    start_i = max(0, end_i + 1 - lookback)
+    return df.iloc[start_i : end_i + 1]

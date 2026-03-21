@@ -3,8 +3,20 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
+import sys
 
-import pandas as pd
+try:
+    import pandas as pd
+except ModuleNotFoundError as exc:  # pragma: no cover - startup guard
+    missing = exc.name or "a required package"
+    print(
+        "Missing Python dependency: "
+        f"{missing}\n"
+        "Install the project requirements, then rerun the backtest:\n"
+        "python3 -m pip install -r /Users/liamrodgers/Desktop/Python/Personal/requirements.txt",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from exc
 
 from btc15m import BacktestConfig, CoinbaseClient, run_backtest, summarize_backtest
 
@@ -56,6 +68,68 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fractional-kelly", type=float, default=0.50)
     parser.add_argument("--max-fraction", type=float, default=0.20)
     parser.add_argument("--min-history", type=int, default=40)
+    parser.add_argument(
+        "--disable-regime-filter",
+        action="store_true",
+        help="Disable the bull/up, bear/down, neutral/no-trade regime gate.",
+    )
+    parser.add_argument(
+        "--regime-lookback",
+        type=int,
+        default=480,
+        help="15m candles used for the Markov-GARCH regime fit.",
+    )
+    parser.add_argument(
+        "--regime-min-history",
+        type=int,
+        default=80,
+        help="Minimum 15m candles required before the regime model activates.",
+    )
+    parser.add_argument(
+        "--disable-particle-filter",
+        action="store_true",
+        help="Disable the regime-aware particle filter indicator during backtests.",
+    )
+    parser.add_argument(
+        "--particle-filter-lookback",
+        type=int,
+        default=240,
+        help="15m candles used for the particle filter.",
+    )
+    parser.add_argument(
+        "--particle-filter-particles",
+        type=int,
+        default=300,
+        help="Number of particles used by the fair-value filter.",
+    )
+    parser.add_argument(
+        "--disable-particle-filter-entry-filter",
+        action="store_true",
+        help="Keep computing the PF indicator but do not require it for trade entry.",
+    )
+    parser.add_argument(
+        "--particle-filter-min-gap",
+        type=float,
+        default=0.0,
+        help="Minimum absolute price gap required versus PF fair value before entry is allowed.",
+    )
+    parser.add_argument(
+        "--disable-walk-forward-indicators",
+        action="store_true",
+        help="Use full-sample indicator fitting instead of sparse walk-forward refits.",
+    )
+    parser.add_argument(
+        "--regime-refit-every",
+        type=int,
+        default=96,
+        help="How many 15m bars between walk-forward regime refits. Default 96 = daily.",
+    )
+    parser.add_argument(
+        "--particle-filter-refit-every",
+        type=int,
+        default=8,
+        help="How many 15m bars between walk-forward particle-filter refits. Default 8 = 2 hours.",
+    )
     parser.add_argument(
         "--entry-timing",
         choices=["open", "close"],
@@ -134,10 +208,13 @@ def load_odds(path: Path | None) -> pd.DataFrame | None:
 
 def build_distribution_table(results: pd.DataFrame, stats) -> pd.DataFrame:
     traded = results[results["decision"].isin(["UP", "DOWN"])].copy()
+    pf_blocked = results[results.get("blocked_by_particle_filter", False).astype(bool)].copy() if "blocked_by_particle_filter" in results.columns else pd.DataFrame()
+    regime_summary = summarize_regimes(results)
 
     rows: list[dict[str, object]] = [
         {"section": "overall", "group": "all", "metric": "rows", "value": float(len(results))},
         {"section": "overall", "group": "all", "metric": "trades", "value": float(stats.trades)},
+        {"section": "overall", "group": "all", "metric": "pf_blocked", "value": float(len(pf_blocked))},
         {"section": "overall", "group": "all", "metric": "wins", "value": float(stats.wins)},
         {"section": "overall", "group": "all", "metric": "losses", "value": float(stats.losses)},
         {"section": "overall", "group": "all", "metric": "win_rate", "value": float(stats.win_rate)},
@@ -166,6 +243,24 @@ def build_distribution_table(results: pd.DataFrame, stats) -> pd.DataFrame:
             "value": float(stats.avg_trade_return_pct * 100.0),
         },
     ]
+
+    for regime_name, summary in regime_summary.items():
+        rows.extend(
+            [
+                {
+                    "section": "regime",
+                    "group": regime_name,
+                    "metric": "bars",
+                    "value": float(summary["bars"]),
+                },
+                {
+                    "section": "regime",
+                    "group": regime_name,
+                    "metric": "episodes",
+                    "value": float(summary["episodes"]),
+                },
+            ]
+        )
 
     if traded.empty:
         return pd.DataFrame(rows)
@@ -232,6 +327,20 @@ def build_distribution_table(results: pd.DataFrame, stats) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def summarize_regimes(results: pd.DataFrame) -> dict[str, dict[str, int]]:
+    if "regime" not in results.columns or results.empty:
+        return {}
+
+    regime_series = results["regime"].fillna("unknown").astype(str)
+    summary: dict[str, dict[str, int]] = {}
+    for regime_name in ["bull", "bear", "neutral"]:
+        mask = regime_series.eq(regime_name)
+        bars = int(mask.sum())
+        episodes = int((mask & ~mask.shift(1, fill_value=False)).sum())
+        summary[regime_name] = {"bars": bars, "episodes": episodes}
+    return summary
+
+
 def main() -> None:
     args = parse_args()
 
@@ -248,6 +357,17 @@ def main() -> None:
         max_fraction=args.max_fraction,
         min_history=args.min_history,
         entry_timing=args.entry_timing,
+        use_regime_filter=not args.disable_regime_filter,
+        regime_lookback=args.regime_lookback,
+        regime_min_history=args.regime_min_history,
+        use_particle_filter=not args.disable_particle_filter,
+        particle_filter_lookback=args.particle_filter_lookback,
+        particle_filter_particles=args.particle_filter_particles,
+        particle_filter_entry_filter=not args.disable_particle_filter_entry_filter,
+        particle_filter_min_gap=args.particle_filter_min_gap,
+        walk_forward_indicators=not args.disable_walk_forward_indicators,
+        regime_refit_every=args.regime_refit_every,
+        particle_filter_refit_every=args.particle_filter_refit_every,
     )
 
     results = run_backtest(
@@ -267,6 +387,14 @@ def main() -> None:
     print("Backtest complete")
     print(f"Window: {candles_15m.index.min()} -> {candles_15m.index.max()}")
     print(f"Rows: {len(results)} | Trades: {stats.trades} | Win rate: {stats.win_rate * 100:.2f}%")
+    if "blocked_by_particle_filter" in results.columns:
+        pf_blocked = int(results["blocked_by_particle_filter"].fillna(False).astype(bool).sum())
+        print(f"PF-blocked entries: {pf_blocked}")
+    regime_summary = summarize_regimes(results)
+    bull_summary = regime_summary.get("bull", {"bars": 0, "episodes": 0})
+    bear_summary = regime_summary.get("bear", {"bars": 0, "episodes": 0})
+    print(f"Bull regime bars: {bull_summary['bars']} | Bull regime episodes: {bull_summary['episodes']}")
+    print(f"Bear regime bars: {bear_summary['bars']} | Bear regime episodes: {bear_summary['episodes']}")
     print(f"Final bankroll: ${stats.final_bankroll:,.2f} | Total return: {stats.total_return_pct * 100:.2f}%")
     print(f"Results CSV: {args.output_csv.resolve()}")
     print(f"Distribution CSV: {args.distribution_csv.resolve()}")

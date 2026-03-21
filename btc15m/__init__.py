@@ -1,10 +1,32 @@
 from .coinbase import CoinbaseClient, OrderBookSnapshot, compute_order_book_features, order_book_ladder
 from .backtest import BacktestConfig, BacktestStats, run_backtest, summarize_backtest
-from .features import compute_market_features, compute_price_features, current_15m_window, infer_window_start_price
-from .kelly import KellyResult, kelly_fraction_binary
-from .model import ModelOutput, SignalWeights, predict_up_probability
+from .math import (
+    KellyResult,
+    ModelOutput,
+    ParticleFilterConfig,
+    ParticleFilterSnapshot,
+    RegimeSnapshot,
+    SignalWeights,
+    compute_market_features,
+    compute_particle_filter_frame,
+    compute_price_features,
+    compute_regime_frame,
+    current_15m_window,
+    fit_markov_garch_regime,
+    fit_regime_aware_particle_filter,
+    get_pf_gap,
+    infer_window_start_price,
+    is_price_above_pf_fair_value,
+    is_price_below_pf_fair_value,
+    kelly_fraction_binary,
+    predict_up_probability,
+    project_particle_filter_fair_price,
+    project_particle_filter_to_time,
+    snapshot_from_particle_filter_frame,
+    snapshot_from_regime_frame,
+)
 from .paper import PaperSummary, append_trade, ensure_log, load_trades, settle_open_trades, summarize
-from .strategy import TradeDecision, decide_trade_side
+from .strategy import TradeDecision, apply_particle_filter_entry_filter, decide_trade_side
 
 __all__ = [
     "CoinbaseClient",
@@ -22,8 +44,22 @@ __all__ = [
     "KellyResult",
     "kelly_fraction_binary",
     "ModelOutput",
+    "ParticleFilterConfig",
+    "ParticleFilterSnapshot",
+    "RegimeSnapshot",
     "SignalWeights",
     "predict_up_probability",
+    "compute_particle_filter_frame",
+    "compute_regime_frame",
+    "fit_markov_garch_regime",
+    "fit_regime_aware_particle_filter",
+    "get_pf_gap",
+    "is_price_above_pf_fair_value",
+    "is_price_below_pf_fair_value",
+    "project_particle_filter_fair_price",
+    "project_particle_filter_to_time",
+    "snapshot_from_particle_filter_frame",
+    "snapshot_from_regime_frame",
     "PaperSummary",
     "append_trade",
     "ensure_log",
@@ -31,5 +67,6 @@ __all__ = [
     "settle_open_trades",
     "summarize",
     "TradeDecision",
+    "apply_particle_filter_entry_filter",
     "decide_trade_side",
 ]

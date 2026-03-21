@@ -15,7 +15,11 @@ PAPER_COLUMNS = [
     "window_start_utc",
     "window_end_utc",
     "side",
+    "regime",
+    "regime_allowed_side",
+    "regime_confidence",
     "market_price",
+    "spot_price",
     "fee_rate",
     "p_up",
     "p_down",
@@ -56,6 +60,15 @@ def ensure_log(path: str | Path) -> Path:
 
     if not log_path.exists():
         pd.DataFrame(columns=PAPER_COLUMNS).to_csv(log_path, index=False)
+        return log_path
+
+    frame = pd.read_csv(log_path)
+    if list(frame.columns) != PAPER_COLUMNS:
+        for column in PAPER_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = np.nan
+        frame = frame.reindex(columns=PAPER_COLUMNS)
+        frame.to_csv(log_path, index=False)
 
     return log_path
 
