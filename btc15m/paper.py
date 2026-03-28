@@ -48,7 +48,7 @@ class PaperSummary:
     wins: int
     losses: int
     win_rate: float
-    total_pnl: float
+    net_price_move: float
     avg_return_pct: float
 
 
@@ -95,6 +95,9 @@ def settle_open_trades(
     if frame.empty:
         return 0, 0
 
+    for column in ("outcome_side", "status", "settled_at_utc"):
+        frame[column] = frame[column].astype(object)
+
     if now_utc is None:
         now_utc = pd.Timestamp.now(tz="UTC")
 
@@ -127,19 +130,16 @@ def settle_open_trades(
         outcome_side = "UP" if end_price >= start_price else "DOWN"
 
         side = str(frame.at[idx, "side"]).upper()
-        stake_usd = _to_float(frame.at[idx, "stake_usd"], default=0.0)
-        market_price = _to_float(frame.at[idx, "market_price"], default=np.nan)
-        fee_rate = _to_float(frame.at[idx, "fee_rate"], default=0.0)
+        raw_change = end_price - start_price
 
         pnl = np.nan
         ret = np.nan
-
-        if stake_usd > 0 and 0 < market_price < 1 and side in {"UP", "DOWN"}:
-            effective_price = min(0.999999, market_price * (1.0 + fee_rate))
-            shares = stake_usd / effective_price
-            payout = shares if side == outcome_side else 0.0
-            pnl = payout - stake_usd
-            ret = pnl / stake_usd if stake_usd > 0 else np.nan
+        if side == "UP":
+            pnl = raw_change
+            ret = raw_change / start_price if start_price > 0 else np.nan
+        elif side == "DOWN":
+            pnl = -raw_change
+            ret = (-raw_change) / start_price if start_price > 0 else np.nan
 
         frame.at[idx, "start_price"] = float(start_price)
         frame.at[idx, "end_price"] = float(end_price)
@@ -170,7 +170,7 @@ def summarize(path: str | Path) -> PaperSummary:
             wins=0,
             losses=0,
             win_rate=0.0,
-            total_pnl=0.0,
+            net_price_move=0.0,
             avg_return_pct=0.0,
         )
 
@@ -188,7 +188,7 @@ def summarize(path: str | Path) -> PaperSummary:
         wins=wins,
         losses=losses,
         win_rate=(wins / settled_count) if settled_count > 0 else 0.0,
-        total_pnl=float(settled["pnl_usd"].fillna(0.0).sum()) if settled_count > 0 else 0.0,
+        net_price_move=float(settled["pnl_usd"].fillna(0.0).sum()) if settled_count > 0 else 0.0,
         avg_return_pct=float(settled["return_pct"].fillna(0.0).mean()) if settled_count > 0 else 0.0,
     )
 

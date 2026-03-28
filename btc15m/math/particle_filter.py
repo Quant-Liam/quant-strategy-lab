@@ -95,6 +95,7 @@ def compute_particle_filter_frame(
         )
         # Fair value transition:
         # f_t = f_{t-1} + d_t + epsilon_t
+        # rng. is a random number generator that produces the same sequence of numbers every time for reproducibility. The noise terms are normally distributed with standard deviations defined by the current regime's scales.
         fair_particles = fair_particles + drift_particles + rng.normal(scale=scale["fair_noise"], size=n_particles)
 
         # Observation model:
